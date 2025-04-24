@@ -1,14 +1,23 @@
-use chrono::{DateTime, Datelike, Days, Local, Months, NaiveDate, TimeDelta};
+use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use ratatui::{
+    DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyModifiers},
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Style, Stylize},
+    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
+    symbols::Marker,
     text::{Line, Span, Text},
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table, TableState},
-    *,
+    widgets::{
+        Axis, Block, Borders, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table, TableState,
+    },
 };
-use std::rc::Rc;
-use std::{clone, io};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    env,
+    fs::{self, File, OpenOptions},
+    io::{self, Error, Read, Write},
+};
+use tui_textarea::{CursorMove, Input, TextArea};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum SelectedFrame {
@@ -16,7 +25,6 @@ enum SelectedFrame {
     Chart,
 }
 
-#[allow(dead_code)]
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum ChartTimeFrame {
     Month,
@@ -24,65 +32,112 @@ enum ChartTimeFrame {
     WindowYear,
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum WindowType {
+    ClosePopup,
+    InputPopup,
+    MainWindow,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum TextMode {
+    Edit,
+    Append,
+}
+
 #[allow(dead_code)]
-struct App {
+struct App<'a> {
     close: bool,
-    data: Rc<Vec<(String, f64)>>,
+    current_window: WindowType,
+    data: RefCell<Vec<(String, f64)>>,
     table_state: TableState,
     current_frame: SelectedFrame,
     current_tf: ChartTimeFrame,
     selected_date_wy: NaiveDate,
     selected_date_y: NaiveDate,
     selected_date_m: NaiveDate,
+    text_area: [TextArea<'a>; 2],
+    text_is_valid: [bool; 2],
+    selected_area: usize,
+    text_mode: Option<TextMode>,
+    message: Option<String>,
 }
 
 fn center_text(s: String) -> Text<'static> {
     return Text::styled(s, Style::default()).centered();
 }
 
+fn get_data_file() -> io::Result<String> {
+    let home_path = env::var("HOME");
+    let mut path;
+    if home_path.is_ok() {
+        path = home_path.unwrap();
+        path.push('/');
+        path.push_str(DEFAULT_DIR);
+        if !fs::exists(&path)? {
+            fs::create_dir_all(&path)?;
+        }
+        path.push_str(DEFAULT_FILE_NAME);
+    } else {
+        return Err(Error::other("$HOME is not defined."));
+    }
+    return Ok(path);
+}
+
 fn main() -> io::Result<()> {
     let mut term = ratatui::init();
-    let mut app = App::default_test();
+    let mut app = App::default();
+    let path = get_data_file()?;
+    if fs::exists(&path)? {
+        app.import_data(&path)?;
+    }
     app.table_state.select_last();
     let ret = app.run(&mut term);
+    let mut out_file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(&path)?;
+    app.export_data(&mut out_file)?;
     ratatui::try_restore()?;
     return ret;
 }
 
-impl App {
+impl App<'_> {
     #[allow(dead_code)]
     fn default_test() -> Self {
         let now = Local::now().date_naive();
         return App {
             close: false,
-            data: Rc::new(vec![
-                ("23-04-2025".to_string(), 90.1),
-                ("24-04-2025".to_string(), 89.9),
-                ("25-04-2025".to_string(), 90.5),
-                ("26-04-2025".to_string(), 90.1),
-                ("27-04-2025".to_string(), 89.9),
-                ("28-04-2025".to_string(), 90.5),
-                ("29-04-2025".to_string(), 90.1),
-                ("30-04-2025".to_string(), 89.9),
-                ("01-05-2025".to_string(), 90.5),
-                ("02-05-2025".to_string(), 90.1),
-                ("03-05-2025".to_string(), 89.9),
-                ("04-05-2025".to_string(), 90.5),
-                ("05-05-2025".to_string(), 90.1),
-                ("06-05-2025".to_string(), 89.9),
-                ("07-05-2025".to_string(), 90.5),
-                ("08-05-2025".to_string(), 90.1),
-                ("09-05-2025".to_string(), 89.9),
-                ("10-05-2025".to_string(), 90.5),
-                ("11-05-2025".to_string(), 90.1),
-                ("12-05-2025".to_string(), 89.9),
-                ("13-05-2025".to_string(), 90.5),
-                ("14-05-2025".to_string(), 90.1),
-                ("15-05-2025".to_string(), 89.9),
-                ("16-05-2025".to_string(), 90.5),
-                ("17-05-2025".to_string(), 90.1),
-                ("18-05-2025".to_string(), 89.9),
-                ("19-05-2025".to_string(), 90.5),
+            current_window: WindowType::MainWindow,
+            data: RefCell::new(vec![
+                ("23-04-2024".to_string(), 90.1),
+                ("24-04-2024".to_string(), 89.9),
+                ("25-04-2024".to_string(), 90.5),
+                ("26-04-2024".to_string(), 90.1),
+                ("27-04-2024".to_string(), 89.9),
+                ("28-04-2024".to_string(), 90.5),
+                ("29-04-2024".to_string(), 90.1),
+                ("30-04-2024".to_string(), 89.9),
+                ("01-05-2024".to_string(), 90.5),
+                ("02-05-2024".to_string(), 90.1),
+                ("03-05-2024".to_string(), 89.9),
+                ("04-05-2024".to_string(), 90.5),
+                ("05-05-2024".to_string(), 90.1),
+                ("06-05-2024".to_string(), 89.9),
+                ("07-05-2024".to_string(), 90.5),
+                ("08-05-2024".to_string(), 90.1),
+                ("09-05-2024".to_string(), 89.9),
+                ("10-05-2024".to_string(), 90.5),
+                ("11-05-2024".to_string(), 90.1),
+                ("12-05-2024".to_string(), 89.9),
+                ("13-05-2024".to_string(), 90.5),
+                ("14-05-2024".to_string(), 90.1),
+                ("15-05-2024".to_string(), 89.9),
+                ("16-05-2024".to_string(), 90.5),
+                ("17-05-2024".to_string(), 90.1),
+                ("18-05-2024".to_string(), 89.9),
+                ("19-05-2024".to_string(), 90.5),
             ]),
             table_state: TableState::default(),
             current_frame: SelectedFrame::Table,
@@ -90,6 +145,11 @@ impl App {
             selected_date_wy: now.clone(),
             selected_date_y: now.clone(),
             selected_date_m: now,
+            text_area: [TextArea::default(), TextArea::default()],
+            text_is_valid: [false, false],
+            selected_area: 1,
+            text_mode: None,
+            message: None,
         };
     }
 
@@ -98,14 +158,89 @@ impl App {
         let now = Local::now().date_naive();
         return App {
             close: false,
-            data: Rc::new(Vec::new()),
+            current_window: WindowType::MainWindow,
+            data: RefCell::new(Vec::new()),
             table_state: TableState::default(),
             current_frame: SelectedFrame::Table,
             current_tf: ChartTimeFrame::Month,
             selected_date_wy: now.clone(),
             selected_date_y: now.clone(),
             selected_date_m: now,
+            text_area: [TextArea::default(), TextArea::default()],
+            text_is_valid: [false, false],
+            selected_area: 1,
+            text_mode: None,
+            message: None,
         };
+    }
+
+    fn modify_data(&mut self, element: (String, f64)) -> bool {
+        let cloned_data = RefCell::clone(&self.data);
+        let mut idx = None;
+        for (i, val) in cloned_data.into_inner().iter().enumerate() {
+            if val.0 == element.0 {
+                idx = Some(i);
+                break;
+            }
+        }
+        let data_ref = self.data.get_mut();
+        if let Some(idx) = idx {
+            data_ref[idx].1 = element.1;
+        } else {
+            data_ref.push(element.clone());
+        }
+        return true;
+    }
+
+    fn import_data(&mut self, path: &String) -> io::Result<()> {
+        let mut file = File::open(&path)?;
+        let mut lines = String::new();
+        file.read_to_string(&mut lines)?;
+        let mut ret = lines
+            .split(['\r', '\n'])
+            .filter_map(|x| {
+                if x.is_empty() {
+                    None
+                } else {
+                    Some(
+                        x.trim()
+                            .split(',')
+                            .filter_map(|x| if x.is_empty() { None } else { Some(x.trim()) })
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            })
+            .collect::<VecDeque<_>>();
+        let header = ret.pop_front();
+        if let Some(header) = header {
+            if header.len() != 2 {
+                return Err(Error::other("Invalid Header"));
+            }
+            if header[0] != "Date" && header[1] != "Weight" {
+                return Err(Error::other("Invalid Header"));
+            }
+            let temp = ret
+                .iter()
+                .filter_map(|x| {
+                    if let Ok(num) = x[1].trim().parse::<f64>() {
+                        Some((String::from(x[0]), num))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            self.data = RefCell::new(temp);
+        }
+        return Ok(());
+    }
+
+    fn export_data(&self, file: &mut File) -> io::Result<()> {
+        let cloned_data = RefCell::clone(&self.data);
+        write!(file, "Date, Weight\n")?;
+        for (date, weight) in cloned_data.into_inner().iter() {
+            write!(file, "{}, {:.1}\n", date, weight)?;
+        }
+        return Ok(());
     }
 
     fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
@@ -114,6 +249,154 @@ impl App {
             self.handle_events()?;
         }
         return Ok(());
+    }
+
+    fn init_text_area(&mut self) {
+        let date_text = match self.text_mode {
+            Some(TextMode::Edit) => {
+                let idx = self.table_state.selected();
+                if let Some(idx) = idx {
+                    let data_ref = self.data.get_mut();
+                    self.text_is_valid[0] = true;
+                    data_ref[idx].0.clone()
+                } else {
+                    self.text_is_valid[0] = false;
+                    String::from("")
+                }
+            }
+            Some(TextMode::Append) => {
+                self.text_is_valid[0] = true;
+                Local::now().date_naive().format("%d-%m-%Y").to_string()
+            }
+            None => {
+                self.text_is_valid[0] = false;
+                String::from("")
+            }
+        };
+
+        let weight_text = match self.text_mode {
+            Some(TextMode::Edit) => {
+                let idx = self.table_state.selected();
+                if let Some(idx) = idx {
+                    let data_ref = self.data.get_mut();
+                    self.text_is_valid[0] = true;
+                    format!("{:.1}", data_ref[idx].1)
+                } else {
+                    self.text_is_valid[0] = false;
+                    String::from("")
+                }
+            }
+            _ => {
+                self.text_is_valid[0] = false;
+                String::from("")
+            }
+        };
+
+        self.selected_area = 1;
+
+        self.text_area[0] = TextArea::new(vec![date_text]);
+        self.text_area[1] = TextArea::new(vec![weight_text]);
+
+        self.text_area[0].move_cursor(CursorMove::End);
+        self.text_area[1].move_cursor(CursorMove::End);
+    }
+
+    fn activate_text(&mut self) {
+        if self.selected_area == 0 {
+            let text = self.text_area[0].lines()[0].clone();
+            let date = NaiveDate::parse_from_str(text.as_str(), "%d-%m-%Y");
+            if let Ok(_) = date {
+                self.text_area[0].set_cursor_line_style(Style::default().fg(Color::LightGreen));
+                self.text_area[0]
+                    .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+                self.text_area[0].set_block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Color::LightGreen)
+                        .title(" Date ")
+                        .title_bottom(" Valid "),
+                );
+                self.text_is_valid[0] = true;
+            } else {
+                self.text_area[0].set_cursor_line_style(Style::default().fg(Color::LightRed));
+                self.text_area[0]
+                    .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+                self.text_area[0].set_block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Color::LightRed)
+                        .title(" Date ")
+                        .title_bottom(" Invalid "),
+                );
+                self.text_is_valid[0] = false;
+            }
+        } else if self.selected_area == 1 {
+            let text = self.text_area[1].lines()[0].clone();
+            let weight = text.parse::<f64>();
+            match weight {
+                Ok(w) if w > 0f64 => {
+                    self.text_area[1].set_cursor_line_style(Style::default().fg(Color::LightGreen));
+                    self.text_area[1]
+                        .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+                    self.text_area[1].set_block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Color::LightGreen)
+                            .title(" Weight ")
+                            .title_bottom(" Valid "),
+                    );
+                    self.text_is_valid[0] = true;
+                }
+                _ => {
+                    self.text_area[1].set_cursor_line_style(Style::default().fg(Color::LightRed));
+                    self.text_area[1]
+                        .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+                    self.text_area[1].set_block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Color::LightRed)
+                            .title(" Weight ")
+                            .title_bottom(" Invalid "),
+                    );
+                    self.text_is_valid[1] = false;
+                }
+            }
+        }
+    }
+
+    fn inactivate_text(&mut self) {
+        let inactive_area = (self.selected_area + 1) % 2;
+        self.text_area[inactive_area].set_cursor_line_style(Style::default());
+        self.text_area[inactive_area].set_cursor_style(Style::default());
+        let title = if inactive_area == 0 {
+            " Date "
+        } else if inactive_area == 1 {
+            " Weight "
+        } else {
+            unreachable!("Invalid index");
+        };
+        if inactive_area == 0 {
+            let text = self.text_area[0].lines()[0].clone();
+            let date = NaiveDate::parse_from_str(text.as_str(), "%d-%m-%Y");
+            if let Ok(_) = date {
+                self.text_is_valid[0] = true;
+            } else {
+                self.text_is_valid[0] = false;
+            }
+        } else if inactive_area == 1 {
+            let text = self.text_area[1].lines()[0].parse::<f64>();
+            if let Ok(_) = text {
+                self.text_is_valid[1] = true;
+            } else {
+                self.text_is_valid[1] = false;
+            }
+        }
+        self.text_area[inactive_area].set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .style(Style::default().fg(Color::DarkGray))
+                .title(title),
+        );
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -142,7 +425,41 @@ impl App {
         }
 
         // Key hint
-        self.render_key_hints(chunks[2], frame);
+        self.render_message_box(chunks[2], frame);
+        if self.current_window == WindowType::ClosePopup {
+            self.render_close_popup(frame);
+        } else if self.current_window == WindowType::InputPopup {
+            self.render_input_popup(frame);
+        }
+    }
+
+    fn render_input_popup(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+        let horizontal = Layout::horizontal([Constraint::Length(25)]).flex(Flex::Center);
+        let [area_popup] = vertical.areas(area);
+        let [area_popup] = horizontal.areas(area_popup);
+        let horizontal =
+            Layout::horizontal([Constraint::Length(15), Constraint::Length(11)]).flex(Flex::Center);
+        let area: [Rect; 2] = horizontal.areas(area_popup);
+
+        self.activate_text();
+        self.inactivate_text();
+
+        frame.render_widget(Clear, area_popup); //this clears out the background
+        frame.render_widget(&self.text_area[0], area[0]);
+        frame.render_widget(&self.text_area[1], area[1]);
+    }
+    fn render_close_popup(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+        let horizontal = Layout::horizontal([Constraint::Length(21)]).flex(Flex::Center);
+        let [area] = vertical.areas(area);
+        let [area] = horizontal.areas(area);
+        let block = Block::bordered();
+        let text = Paragraph::new(center_text(String::from("Quit the app? [Y/n]"))).block(block);
+        frame.render_widget(Clear, area); //this clears out the background
+        frame.render_widget(text, area);
     }
 
     fn render_title(&self, area: Rect, frame: &mut Frame) {
@@ -162,7 +479,7 @@ impl App {
         };
         let table_block = Block::default().borders(Borders::ALL).style(style);
         let widths = [Constraint::Length(12), Constraint::Length(7)];
-        let cloned_data = Rc::clone(&self.data);
+        let cloned_data = RefCell::clone(&self.data).into_inner();
         let rows = cloned_data
             .iter()
             .map(|x| Row::new([center_text(x.0.clone()), center_text(format!("{:.1}", x.1))]));
@@ -223,7 +540,7 @@ impl App {
                         Style::default(),
                     ),
                 ];
-                let cloned_data = Rc::clone(&self.data);
+                let cloned_data = RefCell::clone(&self.data).into_inner();
                 let data_points = cloned_data
                     .iter()
                     .map(|x| {
@@ -238,9 +555,9 @@ impl App {
                     .fold(f64::MAX, |acc, x| x.1.clone().min(acc));
                 let max_weight = cloned_data.iter().fold(0.0, |acc, x| x.1.clone().max(acc));
                 let dataset = Dataset::default()
-                    .marker(symbols::Marker::HalfBlock)
+                    .marker(Marker::Dot)
                     .style(Style::new().blue())
-                    .graph_type(GraphType::Bar)
+                    .graph_type(GraphType::Scatter)
                     .data(&data_points);
                 let chart = Chart::new(vec![dataset])
                     .block(
@@ -304,7 +621,7 @@ impl App {
                         Style::default(),
                     ),
                 ];
-                let cloned_data = Rc::clone(&self.data);
+                let cloned_data = RefCell::clone(&self.data).into_inner();
                 let data_points = cloned_data
                     .iter()
                     .map(|x| {
@@ -319,9 +636,9 @@ impl App {
                     .fold(f64::MAX, |acc, x| x.1.clone().min(acc));
                 let max_weight = cloned_data.iter().fold(0.0, |acc, x| x.1.clone().max(acc));
                 let dataset = Dataset::default()
-                    .marker(symbols::Marker::HalfBlock)
+                    .marker(Marker::Dot)
                     .style(Style::new().blue())
-                    .graph_type(GraphType::Bar)
+                    .graph_type(GraphType::Scatter)
                     .data(&data_points);
                 let chart = Chart::new(vec![dataset])
                     .block(
@@ -372,7 +689,7 @@ impl App {
                         Style::default(),
                     ),
                 ];
-                let cloned_data = Rc::clone(&self.data);
+                let cloned_data = RefCell::clone(&self.data).into_inner();
                 let data_points = cloned_data
                     .iter()
                     .map(|x| {
@@ -387,7 +704,7 @@ impl App {
                     .fold(f64::MAX, |acc, x| x.1.clone().min(acc));
                 let max_weight = cloned_data.iter().fold(0.0, |acc, x| x.1.clone().max(acc));
                 let dataset = Dataset::default()
-                    .marker(symbols::Marker::HalfBlock)
+                    .marker(Marker::HalfBlock)
                     .style(Style::new().blue())
                     .graph_type(GraphType::Bar)
                     .data(&data_points);
@@ -424,13 +741,21 @@ impl App {
         };
     }
 
-    fn render_key_hints(&self, area: Rect, frame: &mut Frame) {
+    fn render_message_box(&self, area: Rect, frame: &mut Frame) {
         let title_block = Block::default()
             .borders(Borders::ALL)
             .style(Style::default());
-        let key_hint = Paragraph::new(Span::styled("Press 'q' or C-c to quit.", Style::default()))
-            .block(title_block);
-        frame.render_widget(key_hint, area);
+        let msg = self.message.clone();
+        if let Some(msg) = msg {
+            let msg_str = msg.as_str();
+            let message =
+                Paragraph::new(Span::styled(msg_str, Style::default())).block(title_block);
+            frame.render_widget(message, area);
+        } else {
+            let message =
+                Paragraph::new(Span::styled(DEFAULT_MESSAGE, Style::default())).block(title_block);
+            frame.render_widget(message, area);
+        }
     }
 
     fn toggle_frame(&mut self) {
@@ -462,66 +787,141 @@ impl App {
                 return Ok(());
             }
             match (key.modifiers, key.code) {
-                (_, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                     self.close = true;
                 }
-                (_, KeyCode::Tab) => self.toggle_frame(),
+                (_, KeyCode::Esc) => match self.current_window {
+                    WindowType::MainWindow => self.current_window = WindowType::ClosePopup,
+                    WindowType::ClosePopup => self.current_window = WindowType::MainWindow,
+                    WindowType::InputPopup => self.current_window = WindowType::MainWindow,
+                },
+                (_, KeyCode::Enter) => match self.current_window {
+                    WindowType::MainWindow => {}
+                    WindowType::ClosePopup => self.close = true,
+                    WindowType::InputPopup => {
+                        let (date, weight) = (
+                            self.text_area[0].lines()[0].clone(),
+                            self.text_area[1].lines()[0].parse::<f64>(),
+                        );
+                        let date_is_valid = if let Ok(_) =
+                            NaiveDate::parse_from_str(date.clone().as_str(), "%d-%m-%Y")
+                        {
+                            true
+                        } else {
+                            false
+                        };
+                        let weight_is_valid = if let Ok(w) = weight { w > 0f64 } else { false };
+                        if date_is_valid && weight_is_valid {
+                            if self.modify_data((date, weight.unwrap())) {
+                                self.current_window = WindowType::MainWindow;
+                                self.table_state.select_last();
+                            }
+                        } else {
+                        }
+                    }
+                },
+                (_, KeyCode::Tab) => match self.current_window {
+                    WindowType::MainWindow => self.toggle_frame(),
+                    WindowType::InputPopup => self.selected_area = (self.selected_area + 1) % 2,
+                    _ => {}
+                },
+                (_, KeyCode::Backspace) => match self.current_window {
+                    WindowType::InputPopup => {
+                        let _ = self.text_area[self.selected_area].delete_char();
+                    }
+                    _ => {}
+                },
                 (_, KeyCode::Char(ch)) => {
                     // Local key-binds
-                    if self.current_frame == SelectedFrame::Table {
-                        match ch {
-                            'q' => self.close = true,
-                            'k' => self.table_state.select_previous(),
-                            'j' => self.table_state.select_next(),
+                    match self.current_window {
+                        WindowType::MainWindow => {
+                            if self.current_frame == SelectedFrame::Table {
+                                match ch {
+                                    'q' => self.current_window = WindowType::ClosePopup,
+                                    'k' => self.table_state.select_previous(),
+                                    'j' => self.table_state.select_next(),
+                                    'a' => {
+                                        self.current_window = WindowType::InputPopup;
+                                        self.text_mode = Some(TextMode::Append);
+                                        self.init_text_area();
+                                    }
+                                    'e' => {
+                                        self.current_window = WindowType::InputPopup;
+                                        self.text_mode = Some(TextMode::Edit);
+                                        self.init_text_area();
+                                    }
+                                    _ => {}
+                                };
+                            } else if self.current_frame == SelectedFrame::Chart {
+                                match ch {
+                                    'q' => self.current_window = WindowType::ClosePopup,
+                                    'k' => self.cycle_prev_tf(),
+                                    'j' => self.cycle_next_tf(),
+                                    'a' => {
+                                        self.current_window = WindowType::InputPopup;
+                                        self.text_mode = Some(TextMode::Append);
+                                        self.init_text_area();
+                                    }
+                                    'e' => {
+                                        self.current_window = WindowType::InputPopup;
+                                        self.text_mode = Some(TextMode::Edit);
+                                        self.init_text_area();
+                                    }
+                                    'h' => match self.current_tf {
+                                        ChartTimeFrame::Month => {
+                                            self.selected_date_m = self
+                                                .selected_date_m
+                                                .checked_sub_months(Months::new(1))
+                                                .unwrap()
+                                        }
+                                        ChartTimeFrame::Year => {
+                                            self.selected_date_y = self
+                                                .selected_date_y
+                                                .checked_sub_months(Months::new(12))
+                                                .unwrap()
+                                        }
+                                        ChartTimeFrame::WindowYear => {
+                                            self.selected_date_wy = self
+                                                .selected_date_wy
+                                                .checked_sub_days(Days::new(1))
+                                                .unwrap()
+                                        }
+                                    },
+                                    'l' => match self.current_tf {
+                                        ChartTimeFrame::Month => {
+                                            self.selected_date_m = self
+                                                .selected_date_m
+                                                .checked_add_months(Months::new(1))
+                                                .unwrap()
+                                        }
+                                        ChartTimeFrame::Year => {
+                                            self.selected_date_y = self
+                                                .selected_date_y
+                                                .checked_add_months(Months::new(12))
+                                                .unwrap()
+                                        }
+                                        ChartTimeFrame::WindowYear => {
+                                            self.selected_date_wy = self
+                                                .selected_date_wy
+                                                .checked_add_days(Days::new(1))
+                                                .unwrap()
+                                        }
+                                    },
+                                    _ => {}
+                                };
+                            }
+                        }
+                        WindowType::ClosePopup => match ch {
+                            'y' => self.close = true,
+                            'n' => self.current_window = WindowType::MainWindow,
                             _ => {}
-                        };
-                    } else if self.current_frame == SelectedFrame::Chart {
-                        match ch {
-                            'q' => self.close = true,
-                            'k' => self.cycle_prev_tf(),
-                            'j' => self.cycle_next_tf(),
-                            'h' => match self.current_tf {
-                                ChartTimeFrame::Month => {
-                                    self.selected_date_m = self
-                                        .selected_date_m
-                                        .checked_sub_months(Months::new(1))
-                                        .unwrap()
-                                }
-                                ChartTimeFrame::Year => {
-                                    self.selected_date_y = self
-                                        .selected_date_y
-                                        .checked_sub_months(Months::new(12))
-                                        .unwrap()
-                                }
-                                ChartTimeFrame::WindowYear => {
-                                    self.selected_date_wy = self
-                                        .selected_date_wy
-                                        .checked_sub_days(Days::new(1))
-                                        .unwrap()
-                                }
-                            },
-                            'l' => match self.current_tf {
-                                ChartTimeFrame::Month => {
-                                    self.selected_date_m = self
-                                        .selected_date_m
-                                        .checked_add_months(Months::new(1))
-                                        .unwrap()
-                                }
-                                ChartTimeFrame::Year => {
-                                    self.selected_date_y = self
-                                        .selected_date_y
-                                        .checked_add_months(Months::new(12))
-                                        .unwrap()
-                                }
-                                ChartTimeFrame::WindowYear => {
-                                    self.selected_date_wy = self
-                                        .selected_date_wy
-                                        .checked_add_days(Days::new(1))
-                                        .unwrap()
-                                }
-                            },
-                            _ => {}
-                        };
+                        },
+                        WindowType::InputPopup => {
+                            let input: Input = Event::Key(key).into();
+                            if self.text_area[self.selected_area].input(input) {
+                                self.activate_text();
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -533,3 +933,6 @@ impl App {
 
 const OFFSET_MIN: f64 = 2.0;
 const OFFSET_MAX: f64 = 2.0;
+const DEFAULT_MESSAGE: &str = "Press 'q' to exit.";
+const DEFAULT_DIR: &str = ".cache/weight-tracker/";
+const DEFAULT_FILE_NAME: &str = "weight-tracker.csv";

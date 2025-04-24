@@ -5,4 +5,6 @@ edition = "2024"
 
 [dependencies]
 chrono = "0.4.40"
+# ratatui = "0.30.0-alpha.2"
 ratatui = "0.29.0"
+tui-textarea = "0.7.0"
