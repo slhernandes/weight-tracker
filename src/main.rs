@@ -704,9 +704,11 @@ impl App<'_> {
                     .fold(f64::MAX, |acc, x| x.1.clone().min(acc));
                 let max_weight = cloned_data.iter().fold(0.0, |acc, x| x.1.clone().max(acc));
                 let dataset = Dataset::default()
-                    .marker(Marker::HalfBlock)
+                    // .marker(Marker::HalfBlock)
+                    .marker(Marker::Dot)
                     .style(Style::new().blue())
-                    .graph_type(GraphType::Bar)
+                    // .graph_type(GraphType::Bar) // Bar is fucked on v0.29.0
+                    .graph_type(GraphType::Scatter)
                     .data(&data_points);
                 let chart = Chart::new(vec![dataset])
                     .block(
@@ -748,20 +750,30 @@ impl App<'_> {
         let msg = self.message.clone();
         if let Some(msg) = msg {
             let msg_str = msg.as_str();
-            let message =
-                Paragraph::new(Span::styled(msg_str, Style::default())).block(title_block);
+            let message = Paragraph::new(Span::styled(msg_str, Style::default()))
+                .centered()
+                .block(title_block);
             frame.render_widget(message, area);
         } else {
-            let message =
-                Paragraph::new(Span::styled(DEFAULT_MESSAGE, Style::default())).block(title_block);
+            let message = Paragraph::new(Span::styled(DEFAULT_MESSAGE, Style::default()))
+                .centered()
+                .block(title_block);
             frame.render_widget(message, area);
         }
     }
 
     fn toggle_frame(&mut self) {
         self.current_frame = match self.current_frame {
-            SelectedFrame::Chart => SelectedFrame::Table,
-            SelectedFrame::Table => SelectedFrame::Chart,
+            SelectedFrame::Chart => {
+                self.message = None;
+                SelectedFrame::Table
+            }
+            SelectedFrame::Table => {
+                self.message = Some(String::from(
+                    "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
+                ));
+                SelectedFrame::Chart
+            }
         }
     }
 
@@ -791,9 +803,22 @@ impl App<'_> {
                     self.close = true;
                 }
                 (_, KeyCode::Esc) => match self.current_window {
-                    WindowType::MainWindow => self.current_window = WindowType::ClosePopup,
-                    WindowType::ClosePopup => self.current_window = WindowType::MainWindow,
-                    WindowType::InputPopup => self.current_window = WindowType::MainWindow,
+                    WindowType::MainWindow => {
+                        self.message = Some(String::from(
+                            "Esc/n => back to main window | Enter/y => quit app",
+                        ));
+                        self.current_window = WindowType::ClosePopup
+                    }
+                    _ => {
+                        if self.current_frame == SelectedFrame::Table {
+                            self.message = None;
+                        } else {
+                            self.message = Some(String::from(
+                                "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
+                            ));
+                        }
+                        self.current_window = WindowType::MainWindow
+                    }
                 },
                 (_, KeyCode::Enter) => match self.current_window {
                     WindowType::MainWindow => {}
@@ -813,6 +838,13 @@ impl App<'_> {
                         let weight_is_valid = if let Ok(w) = weight { w > 0f64 } else { false };
                         if date_is_valid && weight_is_valid {
                             if self.modify_data((date, weight.unwrap())) {
+                                if self.current_frame == SelectedFrame::Table {
+                                    self.message = None;
+                                } else {
+                                    self.message = Some(String::from(
+                                        "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
+                                    ));
+                                }
                                 self.current_window = WindowType::MainWindow;
                                 self.table_state.select_last();
                             }
@@ -837,35 +869,57 @@ impl App<'_> {
                         WindowType::MainWindow => {
                             if self.current_frame == SelectedFrame::Table {
                                 match ch {
-                                    'q' => self.current_window = WindowType::ClosePopup,
+                                    'q' => {
+                                        self.current_window = WindowType::ClosePopup;
+                                        self.message = Some(String::from(
+                                            "Esc/n => back to main window | Enter/y => quit app",
+                                        ));
+                                    }
                                     'k' => self.table_state.select_previous(),
                                     'j' => self.table_state.select_next(),
                                     'a' => {
                                         self.current_window = WindowType::InputPopup;
                                         self.text_mode = Some(TextMode::Append);
                                         self.init_text_area();
+                                        self.message = Some(String::from(
+                                            "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
+                                        ));
                                     }
                                     'e' => {
                                         self.current_window = WindowType::InputPopup;
                                         self.text_mode = Some(TextMode::Edit);
                                         self.init_text_area();
+                                        self.message = Some(String::from(
+                                            "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
+                                        ));
                                     }
                                     _ => {}
                                 };
                             } else if self.current_frame == SelectedFrame::Chart {
                                 match ch {
-                                    'q' => self.current_window = WindowType::ClosePopup,
+                                    'q' => {
+                                        self.current_window = WindowType::ClosePopup;
+                                        self.message = Some(String::from(
+                                            "Esc/n => back to main window | Enter/y => quit app",
+                                        ));
+                                    }
                                     'k' => self.cycle_prev_tf(),
                                     'j' => self.cycle_next_tf(),
                                     'a' => {
                                         self.current_window = WindowType::InputPopup;
                                         self.text_mode = Some(TextMode::Append);
                                         self.init_text_area();
+                                        self.message = Some(String::from(
+                                            "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
+                                        ));
                                     }
                                     'e' => {
                                         self.current_window = WindowType::InputPopup;
                                         self.text_mode = Some(TextMode::Edit);
                                         self.init_text_area();
+                                        self.message = Some(String::from(
+                                            "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
+                                        ));
                                     }
                                     'h' => match self.current_tf {
                                         ChartTimeFrame::Month => {
@@ -913,7 +967,16 @@ impl App<'_> {
                         }
                         WindowType::ClosePopup => match ch {
                             'y' => self.close = true,
-                            'n' => self.current_window = WindowType::MainWindow,
+                            'n' => {
+                                self.current_window = WindowType::MainWindow;
+                                if self.current_frame == SelectedFrame::Table {
+                                    self.message = None;
+                                } else {
+                                    self.message = Some(String::from(
+                                        "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
+                                    ));
+                                }
+                            }
                             _ => {}
                         },
                         WindowType::InputPopup => {
@@ -933,6 +996,6 @@ impl App<'_> {
 
 const OFFSET_MIN: f64 = 2.0;
 const OFFSET_MAX: f64 = 2.0;
-const DEFAULT_MESSAGE: &str = "Press 'q' to exit.";
+const DEFAULT_MESSAGE: &str = "Esc/q => quit app | a => append table | e => edit selected row | j => go down 1 row | k => go up 1 row";
 const DEFAULT_DIR: &str = ".cache/weight-tracker/";
 const DEFAULT_FILE_NAME: &str = "weight-tracker.csv";
