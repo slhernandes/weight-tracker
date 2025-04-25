@@ -15,7 +15,8 @@ use std::{
     cell::RefCell,
     collections::VecDeque,
     fs::{self, File, OpenOptions},
-    io::{self, Error, Read, Write}, time::{Duration, Instant},
+    io::{self, Error, Read, Write},
+    time::{Duration, Instant},
 };
 use tui_textarea::{CursorMove, Input, TextArea};
 
@@ -62,6 +63,9 @@ struct App<'a> {
     text_mode: Option<TextMode>,
     message: Option<String>,
     msg_time_elapsed: Option<Instant>,
+    wait_time_elapsed: Option<Instant>,
+    scroll_offset: usize,
+    reversed_offset: bool,
 }
 
 fn center_text(s: String) -> Text<'static> {
@@ -114,33 +118,11 @@ impl App<'_> {
             close: false,
             current_window: WindowType::MainWindow,
             data: RefCell::new(vec![
-                ("23-04-2024".to_string(), 90.1),
-                ("24-04-2024".to_string(), 89.9),
-                ("25-04-2024".to_string(), 90.5),
                 ("26-04-2024".to_string(), 90.1),
                 ("27-04-2024".to_string(), 89.9),
-                ("28-04-2024".to_string(), 90.5),
-                ("29-04-2024".to_string(), 90.1),
-                ("30-04-2024".to_string(), 89.9),
-                ("01-05-2024".to_string(), 90.5),
-                ("02-05-2024".to_string(), 90.1),
-                ("03-05-2024".to_string(), 89.9),
-                ("04-05-2024".to_string(), 90.5),
-                ("05-05-2024".to_string(), 90.1),
-                ("06-05-2024".to_string(), 89.9),
-                ("07-05-2024".to_string(), 90.5),
-                ("08-05-2024".to_string(), 90.1),
-                ("09-05-2024".to_string(), 89.9),
-                ("10-05-2024".to_string(), 90.5),
-                ("11-05-2024".to_string(), 90.1),
-                ("12-05-2024".to_string(), 89.9),
-                ("13-05-2024".to_string(), 90.5),
-                ("14-05-2024".to_string(), 90.1),
-                ("15-05-2024".to_string(), 89.9),
-                ("16-05-2024".to_string(), 90.5),
-                ("17-05-2024".to_string(), 90.1),
-                ("18-05-2024".to_string(), 89.9),
-                ("19-05-2024".to_string(), 90.5),
+                ("01-05-2024".to_string(), 91.5),
+                ("02-05-2024".to_string(), 94.1),
+                ("03-05-2024".to_string(), 87.9),
             ]),
             table_state: TableState::default(),
             current_frame: FrameType::Table,
@@ -154,6 +136,9 @@ impl App<'_> {
             text_mode: None,
             message: None,
             msg_time_elapsed: None,
+            wait_time_elapsed: None,
+            scroll_offset: 0,
+            reversed_offset: false,
         };
     }
 
@@ -176,6 +161,9 @@ impl App<'_> {
             text_mode: None,
             message: None,
             msg_time_elapsed: None,
+            wait_time_elapsed: None,
+            scroll_offset: 0,
+            reversed_offset: false,
         };
     }
 
@@ -418,37 +406,66 @@ impl App<'_> {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        // Vertical split
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![
-                Constraint::Length(3),
-                Constraint::Min(10),
-                Constraint::Length(3),
-            ])
-            .split(frame.area());
+        let area = frame.area();
+        let w = area.width;
+        let h = area.height;
+        if w >= MIN_WIDTH && h >= MIN_HEIGHT {
+            // Vertical split
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(vec![
+                    Constraint::Length(3),
+                    Constraint::Min(10),
+                    Constraint::Length(3),
+                ])
+                .split(frame.area());
 
-        // Title
-        self.render_title(chunks[0], frame);
+            // Title
+            self.render_title(chunks[0], frame);
 
-        // Middle split
-        {
-            let mid_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Length(21), Constraint::Min(20)])
-                .split(chunks[1]);
+            // Middle split
+            {
+                let mid_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints(vec![Constraint::Length(21), Constraint::Min(20)])
+                    .split(chunks[1]);
 
-            self.render_table(mid_chunks[0], frame);
-            self.render_chart(mid_chunks[1], frame);
+                self.render_table(mid_chunks[0], frame);
+                self.render_chart(mid_chunks[1], frame);
+            }
+
+            // Key hint
+            self.render_message_box(chunks[2], frame);
+            if self.current_window == WindowType::ClosePopup {
+                self.render_close_popup(frame);
+            } else if self.current_window == WindowType::InputPopup {
+                self.render_input_popup(frame);
+            }
+        } else {
+            self.render_window_too_small(frame, w, h);
         }
+    }
 
-        // Key hint
-        self.render_message_box(chunks[2], frame);
-        if self.current_window == WindowType::ClosePopup {
-            self.render_close_popup(frame);
-        } else if self.current_window == WindowType::InputPopup {
-            self.render_input_popup(frame);
-        }
+    fn render_window_too_small(&self, frame: &mut Frame, w: u16, h: u16) {
+        let layout = Layout::vertical([Constraint::Length(4)]).flex(Flex::Center);
+        let w_span = if w < MIN_WIDTH {
+            Span::styled(format!("{}", w), Style::new().light_red())
+        } else {
+            Span::styled(format!("{}", w), Style::new().light_green())
+        };
+        let h_span = if h < MIN_HEIGHT {
+            Span::styled(format!("{}", h), Style::new().light_red())
+        } else {
+            Span::styled(format!("{}", h), Style::new().light_green())
+        };
+        let lines = vec![
+            Line::from("Terminal size too small:"),
+            Line::from(vec![w_span, Span::raw(" x "), h_span]),
+            Line::from("Required size:"),
+            Line::from(format!("{} x {}", MIN_WIDTH, MIN_HEIGHT)),
+        ];
+        let [area] = layout.areas(frame.area());
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
     }
 
     fn render_input_popup(&mut self, frame: &mut Frame) {
@@ -574,8 +591,8 @@ impl App<'_> {
                     .collect::<Vec<_>>();
                 let min_weight = if !data_points.is_empty() {
                     data_points
-                    .iter()
-                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
+                        .iter()
+                        .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
                 } else {
                     0f64 + OFFSET_MIN
                 };
@@ -667,8 +684,8 @@ impl App<'_> {
                     .collect::<Vec<_>>();
                 let min_weight = if !data_points.is_empty() {
                     data_points
-                    .iter()
-                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
+                        .iter()
+                        .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
                 } else {
                     0f64 + OFFSET_MIN
                 };
@@ -747,8 +764,8 @@ impl App<'_> {
                     .collect::<Vec<_>>();
                 let min_weight = if !data_points.is_empty() {
                     data_points
-                    .iter()
-                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
+                        .iter()
+                        .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
                 } else {
                     0f64 + OFFSET_MIN
                 };
@@ -816,7 +833,6 @@ impl App<'_> {
             } else {
                 self.msg_time_elapsed = Some(Instant::now());
             }
-
         } else {
             let message = match self.current_window {
                 WindowType::ClosePopup => {
@@ -834,9 +850,51 @@ impl App<'_> {
                     ),
                 },
             };
-            let message = Paragraph::new(Span::styled(message, Style::default()))
-                .centered()
-                .block(title_block);
+            let tick_count = 3;
+            let max_offset = (message.len() + 2).saturating_sub(usize::from(area.width));
+            self.scroll_offset = self.scroll_offset.clamp(0, max_offset * tick_count);
+            let message = if usize::from(area.width) >= message.len() + 2 {
+                self.wait_time_elapsed = None;
+                Paragraph::new(Span::styled(message, Style::default()))
+                    .centered()
+                    .block(title_block)
+            } else {
+                Paragraph::new(Span::styled(message, Style::default()))
+                    .scroll((
+                        0,
+                        (self.scroll_offset / tick_count)
+                            .clamp(0, usize::from(u16::MAX))
+                            .try_into()
+                            .unwrap(),
+                    ))
+                    .block(title_block)
+            };
+            if let Some(wait_time_elapsed) = self.wait_time_elapsed {
+                if wait_time_elapsed.elapsed() > Duration::from_secs(1) {
+                    self.wait_time_elapsed = None;
+                }
+            } else {
+                if self.reversed_offset {
+                    if self.scroll_offset > 0 {
+                        self.scroll_offset -= 1;
+                    } else {
+                        self.reversed_offset = false;
+                        if self.wait_time_elapsed == None {
+                            self.wait_time_elapsed = Some(Instant::now());
+                        }
+                    }
+                } else {
+                    if self.scroll_offset + 1 <= max_offset * tick_count {
+                        self.scroll_offset += 1;
+                    } else {
+                        self.scroll_offset = max_offset * tick_count;
+                        self.reversed_offset = true;
+                        if self.wait_time_elapsed == None {
+                            self.wait_time_elapsed = Some(Instant::now());
+                        }
+                    }
+                }
+            }
             frame.render_widget(message, area);
         }
     }
@@ -874,8 +932,14 @@ impl App<'_> {
                     self.close = true;
                 }
                 (_, KeyCode::Esc) => match self.current_window {
-                    WindowType::MainWindow => self.current_window = WindowType::ClosePopup,
-                    _ => self.current_window = WindowType::MainWindow,
+                    WindowType::MainWindow => {
+                        self.current_window = WindowType::ClosePopup;
+                        self.scroll_offset = 0;
+                    }
+                    _ => {
+                        self.current_window = WindowType::MainWindow;
+                        self.scroll_offset = 0;
+                    }
                 },
                 (_, KeyCode::Enter) => match self.current_window {
                     WindowType::MainWindow => {}
@@ -896,6 +960,7 @@ impl App<'_> {
                         if date_is_valid && weight_is_valid {
                             if self.modify_data((date, weight.unwrap())) {
                                 self.current_window = WindowType::MainWindow;
+                                self.scroll_offset = 0;
                                 self.table_state.select_last();
                             }
                         } else if date_is_valid {
@@ -924,16 +989,21 @@ impl App<'_> {
                         WindowType::MainWindow => {
                             if self.current_frame == FrameType::Table {
                                 match ch {
-                                    'q' => self.current_window = WindowType::ClosePopup,
+                                    'q' => {
+                                        self.current_window = WindowType::ClosePopup;
+                                        self.scroll_offset = 0;
+                                    }
                                     'k' => self.table_state.select_previous(),
                                     'j' => self.table_state.select_next(),
                                     'a' => {
                                         self.current_window = WindowType::InputPopup;
+                                        self.scroll_offset = 0;
                                         self.text_mode = Some(TextMode::Append);
                                         self.init_text_area();
                                     }
                                     'e' => {
                                         self.current_window = WindowType::InputPopup;
+                                        self.scroll_offset = 0;
                                         self.text_mode = Some(TextMode::Edit);
                                         self.init_text_area();
                                     }
@@ -941,16 +1011,21 @@ impl App<'_> {
                                 };
                             } else if self.current_frame == FrameType::Chart {
                                 match ch {
-                                    'q' => self.current_window = WindowType::ClosePopup,
+                                    'q' => {
+                                        self.current_window = WindowType::ClosePopup;
+                                        self.scroll_offset = 0;
+                                    }
                                     'k' => self.cycle_prev_tf(),
                                     'j' => self.cycle_next_tf(),
                                     'a' => {
                                         self.current_window = WindowType::InputPopup;
+                                        self.scroll_offset = 0;
                                         self.text_mode = Some(TextMode::Append);
                                         self.init_text_area();
                                     }
                                     'e' => {
                                         self.current_window = WindowType::InputPopup;
+                                        self.scroll_offset = 0;
                                         self.text_mode = Some(TextMode::Edit);
                                         self.init_text_area();
                                     }
@@ -1000,7 +1075,10 @@ impl App<'_> {
                         }
                         WindowType::ClosePopup => match ch {
                             'y' => self.close = true,
-                            'n' => self.current_window = WindowType::MainWindow,
+                            'n' => {
+                                self.current_window = WindowType::MainWindow;
+                                self.scroll_offset = 0;
+                            }
                             _ => {}
                         },
                         WindowType::InputPopup => {
@@ -1021,3 +1099,5 @@ impl App<'_> {
 const OFFSET_MIN: f64 = 2.0;
 const OFFSET_MAX: f64 = 2.0;
 const MSG_TIMEOUT: Duration = Duration::from_secs(3);
+const MIN_WIDTH: u16 = 60u16;
+const MIN_HEIGHT: u16 = 20u16;
