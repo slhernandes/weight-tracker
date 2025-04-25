@@ -1,4 +1,5 @@
 use chrono::{Datelike, Days, Local, Months, NaiveDate};
+use directories::BaseDirs;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyModifiers},
@@ -13,14 +14,13 @@ use ratatui::{
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    env,
     fs::{self, File, OpenOptions},
-    io::{self, Error, Read, Write},
+    io::{self, Error, Read, Write}, time::{Duration, Instant},
 };
 use tui_textarea::{CursorMove, Input, TextArea};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum SelectedFrame {
+enum FrameType {
     Table,
     Chart,
 }
@@ -51,7 +51,7 @@ struct App<'a> {
     current_window: WindowType,
     data: RefCell<Vec<(String, f64)>>,
     table_state: TableState,
-    current_frame: SelectedFrame,
+    current_frame: FrameType,
     current_tf: ChartTimeFrame,
     selected_date_wy: NaiveDate,
     selected_date_y: NaiveDate,
@@ -61,6 +61,7 @@ struct App<'a> {
     selected_area: usize,
     text_mode: Option<TextMode>,
     message: Option<String>,
+    msg_time_elapsed: Option<Instant>,
 }
 
 fn center_text(s: String) -> Text<'static> {
@@ -68,20 +69,22 @@ fn center_text(s: String) -> Text<'static> {
 }
 
 fn get_data_file() -> io::Result<String> {
-    let home_path = env::var("HOME");
-    let mut path;
-    if home_path.is_ok() {
-        path = home_path.unwrap();
-        path.push('/');
-        path.push_str(DEFAULT_DIR);
-        if !fs::exists(&path)? {
-            fs::create_dir_all(&path)?;
-        }
-        path.push_str(DEFAULT_FILE_NAME);
-    } else {
-        return Err(Error::other("$HOME is not defined."));
+    let base_dirs = BaseDirs::new();
+    if let None = base_dirs {
+        return Err(Error::other("BaseDirs::new() failed"));
     }
-    return Ok(path);
+    let mut data_path = base_dirs.unwrap().data_local_dir().to_path_buf();
+    data_path.push("weight-tracker");
+    if !data_path.try_exists()? {
+        let data_path_str = data_path.to_str().unwrap();
+        fs::create_dir_all(data_path_str)?;
+    }
+    data_path.push("weight-tracker.csv");
+    let ret = data_path.to_str();
+    if let Some(ret) = ret {
+        return Ok(ret.to_string());
+    }
+    return Err(Error::other("Cannot create path str"));
 }
 
 fn main() -> io::Result<()> {
@@ -140,7 +143,7 @@ impl App<'_> {
                 ("19-05-2024".to_string(), 90.5),
             ]),
             table_state: TableState::default(),
-            current_frame: SelectedFrame::Table,
+            current_frame: FrameType::Table,
             current_tf: ChartTimeFrame::Month,
             selected_date_wy: now.clone(),
             selected_date_y: now.clone(),
@@ -150,6 +153,7 @@ impl App<'_> {
             selected_area: 1,
             text_mode: None,
             message: None,
+            msg_time_elapsed: None,
         };
     }
 
@@ -161,7 +165,7 @@ impl App<'_> {
             current_window: WindowType::MainWindow,
             data: RefCell::new(Vec::new()),
             table_state: TableState::default(),
-            current_frame: SelectedFrame::Table,
+            current_frame: FrameType::Table,
             current_tf: ChartTimeFrame::Month,
             selected_date_wy: now.clone(),
             selected_date_y: now.clone(),
@@ -171,6 +175,7 @@ impl App<'_> {
             selected_area: 1,
             text_mode: None,
             message: None,
+            msg_time_elapsed: None,
         };
     }
 
@@ -193,7 +198,12 @@ impl App<'_> {
     }
 
     fn import_data(&mut self, path: &String) -> io::Result<()> {
-        let mut file = File::open(&path)?;
+        let file = File::open(&path);
+        if let Err(_) = file {
+            // Do nothing in case of file does not exist
+            return Ok(());
+        }
+        let mut file = file.unwrap();
         let mut lines = String::new();
         file.read_to_string(&mut lines)?;
         let mut ret = lines
@@ -244,9 +254,17 @@ impl App<'_> {
     }
 
     fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
+        let tick_rate = Duration::from_micros(16667);
+        let mut now = Instant::now();
         while !self.close {
             term.draw(|f| self.draw(f))?;
-            self.handle_events()?;
+            let timeout = tick_rate.saturating_add(now.elapsed());
+            if event::poll(timeout)? {
+                self.handle_events()?;
+            }
+            if now.elapsed() >= tick_rate {
+                now = Instant::now();
+            }
         }
         return Ok(());
     }
@@ -474,7 +492,7 @@ impl App<'_> {
 
     fn render_table(&mut self, area: Rect, frame: &mut Frame) {
         let style = match self.current_frame {
-            SelectedFrame::Table => Style::default(),
+            FrameType::Table => Style::default(),
             _ => Style::default().dark_gray(),
         };
         let table_block = Block::default().borders(Borders::ALL).style(style);
@@ -500,7 +518,7 @@ impl App<'_> {
 
     fn render_chart(&mut self, area: Rect, frame: &mut Frame) {
         let style = match self.current_frame {
-            SelectedFrame::Table => Style::default().dark_gray(),
+            FrameType::Table => Style::default().dark_gray(),
             _ => Style::default(),
         };
         match self.current_tf {
@@ -543,17 +561,29 @@ impl App<'_> {
                 let cloned_data = RefCell::clone(&self.data).into_inner();
                 let data_points = cloned_data
                     .iter()
-                    .map(|x| {
+                    .filter_map(|x| {
                         let date_point =
                             NaiveDate::parse_from_str(x.0.as_str(), "%d-%m-%Y").unwrap();
                         let diff = (date_point - date_left).num_days() as f64;
-                        (diff, x.1.clone())
+                        if diff >= 0f64 && diff <= delta {
+                            Some((diff, x.1.clone()))
+                        } else {
+                            None
+                        }
                     })
                     .collect::<Vec<_>>();
-                let min_weight = cloned_data
+                let min_weight = if !data_points.is_empty() {
+                    data_points
                     .iter()
-                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc));
-                let max_weight = cloned_data.iter().fold(0.0, |acc, x| x.1.clone().max(acc));
+                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
+                } else {
+                    0f64 + OFFSET_MIN
+                };
+                let max_weight = if !data_points.is_empty() {
+                    data_points.iter().fold(0f64, |acc, x| x.1.clone().max(acc))
+                } else {
+                    100f64 - OFFSET_MAX
+                };
                 let dataset = Dataset::default()
                     .marker(Marker::Dot)
                     .style(Style::new().blue())
@@ -624,17 +654,29 @@ impl App<'_> {
                 let cloned_data = RefCell::clone(&self.data).into_inner();
                 let data_points = cloned_data
                     .iter()
-                    .map(|x| {
+                    .filter_map(|x| {
                         let date_point =
                             NaiveDate::parse_from_str(x.0.as_str(), "%d-%m-%Y").unwrap();
                         let diff = (date_point - date_left).num_days() as f64;
-                        (diff, x.1.clone())
+                        if diff >= 0f64 && diff <= delta {
+                            Some((diff, x.1.clone()))
+                        } else {
+                            None
+                        }
                     })
                     .collect::<Vec<_>>();
-                let min_weight = cloned_data
+                let min_weight = if !data_points.is_empty() {
+                    data_points
                     .iter()
-                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc));
-                let max_weight = cloned_data.iter().fold(0.0, |acc, x| x.1.clone().max(acc));
+                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
+                } else {
+                    0f64 + OFFSET_MIN
+                };
+                let max_weight = if !data_points.is_empty() {
+                    data_points.iter().fold(0f64, |acc, x| x.1.clone().max(acc))
+                } else {
+                    100f64 - OFFSET_MAX
+                };
                 let dataset = Dataset::default()
                     .marker(Marker::Dot)
                     .style(Style::new().blue())
@@ -692,17 +734,29 @@ impl App<'_> {
                 let cloned_data = RefCell::clone(&self.data).into_inner();
                 let data_points = cloned_data
                     .iter()
-                    .map(|x| {
+                    .filter_map(|x| {
                         let date_point =
                             NaiveDate::parse_from_str(x.0.as_str(), "%d-%m-%Y").unwrap();
                         let diff = (date_point - date_left).num_days() as f64;
-                        (diff, x.1.clone())
+                        if diff >= 0f64 && diff <= delta {
+                            Some((diff, x.1.clone()))
+                        } else {
+                            None
+                        }
                     })
                     .collect::<Vec<_>>();
-                let min_weight = cloned_data
+                let min_weight = if !data_points.is_empty() {
+                    data_points
                     .iter()
-                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc));
-                let max_weight = cloned_data.iter().fold(0.0, |acc, x| x.1.clone().max(acc));
+                    .fold(f64::MAX, |acc, x| x.1.clone().min(acc))
+                } else {
+                    0f64 + OFFSET_MIN
+                };
+                let max_weight = if !data_points.is_empty() {
+                    data_points.iter().fold(0f64, |acc, x| x.1.clone().max(acc))
+                } else {
+                    100f64 - OFFSET_MAX
+                };
                 let dataset = Dataset::default()
                     // .marker(Marker::HalfBlock)
                     .marker(Marker::Dot)
@@ -743,7 +797,7 @@ impl App<'_> {
         };
     }
 
-    fn render_message_box(&self, area: Rect, frame: &mut Frame) {
+    fn render_message_box(&mut self, area: Rect, frame: &mut Frame) {
         let title_block = Block::default()
             .borders(Borders::ALL)
             .style(Style::default());
@@ -754,8 +808,33 @@ impl App<'_> {
                 .centered()
                 .block(title_block);
             frame.render_widget(message, area);
+            if let Some(msg_time_elapsed) = self.msg_time_elapsed {
+                if msg_time_elapsed.elapsed() >= MSG_TIMEOUT {
+                    self.message = None;
+                    self.msg_time_elapsed = None;
+                }
+            } else {
+                self.msg_time_elapsed = Some(Instant::now());
+            }
+
         } else {
-            let message = Paragraph::new(Span::styled(DEFAULT_MESSAGE, Style::default()))
+            let message = match self.current_window {
+                WindowType::ClosePopup => {
+                    String::from("Esc/n => back to main window | Enter/y => quit app")
+                }
+                WindowType::InputPopup => String::from(
+                    "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
+                ),
+                WindowType::MainWindow => match self.current_frame {
+                    FrameType::Table => String::from(
+                        "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
+                    ),
+                    FrameType::Chart => String::from(
+                        "Esc/q => quit app | a => append table | e => edit selected row | j => go down 1 row | k => go up 1 row",
+                    ),
+                },
+            };
+            let message = Paragraph::new(Span::styled(message, Style::default()))
                 .centered()
                 .block(title_block);
             frame.render_widget(message, area);
@@ -764,16 +843,8 @@ impl App<'_> {
 
     fn toggle_frame(&mut self) {
         self.current_frame = match self.current_frame {
-            SelectedFrame::Chart => {
-                self.message = None;
-                SelectedFrame::Table
-            }
-            SelectedFrame::Table => {
-                self.message = Some(String::from(
-                    "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
-                ));
-                SelectedFrame::Chart
-            }
+            FrameType::Chart => FrameType::Table,
+            FrameType::Table => FrameType::Chart,
         }
     }
 
@@ -803,22 +874,8 @@ impl App<'_> {
                     self.close = true;
                 }
                 (_, KeyCode::Esc) => match self.current_window {
-                    WindowType::MainWindow => {
-                        self.message = Some(String::from(
-                            "Esc/n => back to main window | Enter/y => quit app",
-                        ));
-                        self.current_window = WindowType::ClosePopup
-                    }
-                    _ => {
-                        if self.current_frame == SelectedFrame::Table {
-                            self.message = None;
-                        } else {
-                            self.message = Some(String::from(
-                                "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
-                            ));
-                        }
-                        self.current_window = WindowType::MainWindow
-                    }
+                    WindowType::MainWindow => self.current_window = WindowType::ClosePopup,
+                    _ => self.current_window = WindowType::MainWindow,
                 },
                 (_, KeyCode::Enter) => match self.current_window {
                     WindowType::MainWindow => {}
@@ -838,17 +895,15 @@ impl App<'_> {
                         let weight_is_valid = if let Ok(w) = weight { w > 0f64 } else { false };
                         if date_is_valid && weight_is_valid {
                             if self.modify_data((date, weight.unwrap())) {
-                                if self.current_frame == SelectedFrame::Table {
-                                    self.message = None;
-                                } else {
-                                    self.message = Some(String::from(
-                                        "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
-                                    ));
-                                }
                                 self.current_window = WindowType::MainWindow;
                                 self.table_state.select_last();
                             }
+                        } else if date_is_valid {
+                            self.message = Some(String::from("Invalid weight format!"));
+                        } else if weight_is_valid {
+                            self.message = Some(String::from("Invalid date format!"));
                         } else {
+                            self.message = Some(String::from("Invalid weight & date format!"));
                         }
                     }
                 },
@@ -867,59 +922,37 @@ impl App<'_> {
                     // Local key-binds
                     match self.current_window {
                         WindowType::MainWindow => {
-                            if self.current_frame == SelectedFrame::Table {
+                            if self.current_frame == FrameType::Table {
                                 match ch {
-                                    'q' => {
-                                        self.current_window = WindowType::ClosePopup;
-                                        self.message = Some(String::from(
-                                            "Esc/n => back to main window | Enter/y => quit app",
-                                        ));
-                                    }
+                                    'q' => self.current_window = WindowType::ClosePopup,
                                     'k' => self.table_state.select_previous(),
                                     'j' => self.table_state.select_next(),
                                     'a' => {
                                         self.current_window = WindowType::InputPopup;
                                         self.text_mode = Some(TextMode::Append);
                                         self.init_text_area();
-                                        self.message = Some(String::from(
-                                            "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
-                                        ));
                                     }
                                     'e' => {
                                         self.current_window = WindowType::InputPopup;
                                         self.text_mode = Some(TextMode::Edit);
                                         self.init_text_area();
-                                        self.message = Some(String::from(
-                                            "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
-                                        ));
                                     }
                                     _ => {}
                                 };
-                            } else if self.current_frame == SelectedFrame::Chart {
+                            } else if self.current_frame == FrameType::Chart {
                                 match ch {
-                                    'q' => {
-                                        self.current_window = WindowType::ClosePopup;
-                                        self.message = Some(String::from(
-                                            "Esc/n => back to main window | Enter/y => quit app",
-                                        ));
-                                    }
+                                    'q' => self.current_window = WindowType::ClosePopup,
                                     'k' => self.cycle_prev_tf(),
                                     'j' => self.cycle_next_tf(),
                                     'a' => {
                                         self.current_window = WindowType::InputPopup;
                                         self.text_mode = Some(TextMode::Append);
                                         self.init_text_area();
-                                        self.message = Some(String::from(
-                                            "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
-                                        ));
                                     }
                                     'e' => {
                                         self.current_window = WindowType::InputPopup;
                                         self.text_mode = Some(TextMode::Edit);
                                         self.init_text_area();
-                                        self.message = Some(String::from(
-                                            "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
-                                        ));
                                     }
                                     'h' => match self.current_tf {
                                         ChartTimeFrame::Month => {
@@ -967,16 +1000,7 @@ impl App<'_> {
                         }
                         WindowType::ClosePopup => match ch {
                             'y' => self.close = true,
-                            'n' => {
-                                self.current_window = WindowType::MainWindow;
-                                if self.current_frame == SelectedFrame::Table {
-                                    self.message = None;
-                                } else {
-                                    self.message = Some(String::from(
-                                        "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
-                                    ));
-                                }
-                            }
+                            'n' => self.current_window = WindowType::MainWindow,
                             _ => {}
                         },
                         WindowType::InputPopup => {
@@ -996,6 +1020,4 @@ impl App<'_> {
 
 const OFFSET_MIN: f64 = 2.0;
 const OFFSET_MAX: f64 = 2.0;
-const DEFAULT_MESSAGE: &str = "Esc/q => quit app | a => append table | e => edit selected row | j => go down 1 row | k => go up 1 row";
-const DEFAULT_DIR: &str = ".cache/weight-tracker/";
-const DEFAULT_FILE_NAME: &str = "weight-tracker.csv";
+const MSG_TIMEOUT: Duration = Duration::from_secs(3);
