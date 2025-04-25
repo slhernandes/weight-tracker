@@ -842,10 +842,10 @@ impl App<'_> {
                     "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
                 ),
                 WindowType::MainWindow => match self.current_frame {
-                    FrameType::Table => String::from(
+                    FrameType::Chart => String::from(
                         "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
                     ),
-                    FrameType::Chart => String::from(
+                    FrameType::Table => String::from(
                         "Esc/q => quit app | a => append table | e => edit selected row | j => go down 1 row | k => go up 1 row",
                     ),
                 },
