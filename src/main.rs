@@ -12,11 +12,7 @@ use ratatui::{
     },
 };
 use std::{
-    cell::RefCell,
-    collections::VecDeque,
-    fs::{self, File, OpenOptions},
-    io::{self, Error, Read, Write},
-    time::{Duration, Instant},
+    cell::RefCell, cmp::Ordering, collections::VecDeque, fs::{self, File, OpenOptions}, io::{self, Error, Read, Write}, time::{Duration, Instant}
 };
 use tui_textarea::{CursorMove, Input, TextArea};
 
@@ -46,6 +42,14 @@ enum TextMode {
     Append,
 }
 
+#[allow(unused)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum MessageType {
+    Info,
+    Warning,
+    Error,
+}
+
 #[allow(dead_code)]
 struct App<'a> {
     close: bool,
@@ -61,11 +65,12 @@ struct App<'a> {
     text_is_valid: [bool; 2],
     selected_area: usize,
     text_mode: Option<TextMode>,
-    message: Option<String>,
+    message: Option<(String, MessageType)>,
     msg_time_elapsed: Option<Instant>,
     wait_time_elapsed: Option<Instant>,
     scroll_offset: usize,
     reversed_offset: bool,
+    rm_confirm: bool,
 }
 
 fn center_text(s: String) -> Text<'static> {
@@ -139,6 +144,7 @@ impl App<'_> {
             wait_time_elapsed: None,
             scroll_offset: 0,
             reversed_offset: false,
+            rm_confirm: false,
         };
     }
 
@@ -164,23 +170,45 @@ impl App<'_> {
             wait_time_elapsed: None,
             scroll_offset: 0,
             reversed_offset: false,
+            rm_confirm: false,
         };
     }
 
-    fn modify_data(&mut self, element: (String, f64)) -> bool {
-        let cloned_data = RefCell::clone(&self.data);
-        let mut idx = None;
-        for (i, val) in cloned_data.into_inner().iter().enumerate() {
-            if val.0 == element.0 {
-                idx = Some(i);
-                break;
-            }
+    fn modify_data(&mut self, element: (String, Option<f64>)) -> bool {
+        let idx = self.table_state.selected_mut();
+        if let None = idx {
+            return false;
         }
+        let idx = idx.unwrap();
         let data_ref = self.data.get_mut();
-        if let Some(idx) = idx {
-            data_ref[idx].1 = element.1;
-        } else {
-            data_ref.push(element.clone());
+        if let (s, Some(num)) = element {
+            if self.text_mode == Some(TextMode::Edit) {
+                data_ref[idx].1 = num;
+            } else if self.text_mode == Some(TextMode::Append) {
+                let l_bound = data_ref.binary_search_by(|x| {
+                    // Format should already checked beforehand.
+                    let lhs = NaiveDate::parse_from_str(x.0.as_str(), "%d-%m-%Y").unwrap();
+                    let rhs = NaiveDate::parse_from_str(s.as_str(), "%d-%m-%Y").unwrap();
+                    if lhs < rhs {
+                        Ordering::Less
+                    } else if lhs == rhs {
+                        Ordering::Equal
+                    } else {
+                        Ordering::Greater
+                    }
+                });
+                if let Ok(_) = l_bound {
+                    self.message = Some((String::from("Cannot add element. Did you mean to edit?"), MessageType::Error));
+                    return false;
+                } else {
+                    data_ref.insert(l_bound.unwrap_err(), (s, num));
+                }
+            }
+        } else if let (_, None) = element {
+            data_ref.remove(idx);
+            self.rm_confirm = false;
+            self.message = None;
+            self.msg_time_elapsed = None;
         }
         return true;
     }
@@ -818,15 +846,26 @@ impl App<'_> {
         let title_block = Block::default()
             .borders(Borders::ALL)
             .style(Style::default());
-        let msg = self.message.clone();
-        if let Some(msg) = msg {
+        if let Some((msg, msg_type)) = &self.message {
             let msg_str = msg.as_str();
-            let message = Paragraph::new(Span::styled(msg_str, Style::default()))
+            let style = match msg_type {
+                MessageType::Warning => {
+                    Style::default().fg(Color::LightYellow)
+                }
+                MessageType::Info => {
+                    Style::default().fg(Color::LightGreen)
+                }
+                MessageType::Error => {
+                    Style::default().fg(Color::LightRed)
+                }
+            };
+            let message = Paragraph::new(Span::styled(msg_str, style))
                 .centered()
                 .block(title_block);
             frame.render_widget(message, area);
             if let Some(msg_time_elapsed) = self.msg_time_elapsed {
                 if msg_time_elapsed.elapsed() >= MSG_TIMEOUT {
+                    self.rm_confirm = false;
                     self.message = None;
                     self.msg_time_elapsed = None;
                 }
@@ -839,14 +878,14 @@ impl App<'_> {
                     String::from("Esc/n => back to main window | Enter/y => quit app")
                 }
                 WindowType::InputPopup => String::from(
-                    "Esc => go to main window | Tab => switch input box | Enter => submit form if valid",
+                    "Esc => go to main window | Tab => switch input box | Enter => submit form",
                 ),
                 WindowType::MainWindow => match self.current_frame {
                     FrameType::Chart => String::from(
-                        "Esc/q => quit app | a => append table | e => edit selected row | j/k => cycle chart | h => decrease x-axis | l => increase x-axis",
+                        "Esc/q: quit app | a: append table | e: edit selected row | j/k: cycle chart | h/l: (-/+)x-axis",
                     ),
                     FrameType::Table => String::from(
-                        "Esc/q => quit app | a => append table | e => edit selected row | j => go down 1 row | k => go up 1 row",
+                        "Esc/q: quit app | a: append table | e: edit selected row | j/k: (↓/↑) 1 row | d: delete 1 row",
                     ),
                 },
             };
@@ -958,23 +997,27 @@ impl App<'_> {
                         };
                         let weight_is_valid = if let Ok(w) = weight { w > 0f64 } else { false };
                         if date_is_valid && weight_is_valid {
-                            if self.modify_data((date, weight.unwrap())) {
+                            if self.modify_data((date, Some(weight.unwrap()))) {
                                 self.current_window = WindowType::MainWindow;
                                 self.scroll_offset = 0;
                                 self.table_state.select_last();
+                                self.text_mode = None;
                             }
                         } else if date_is_valid {
-                            self.message = Some(String::from("Invalid weight format!"));
+                            self.message = Some((String::from("Invalid weight format!"), MessageType::Error));
                         } else if weight_is_valid {
-                            self.message = Some(String::from("Invalid date format!"));
+                            self.message = Some((String::from("Invalid date format!"), MessageType::Error));
                         } else {
-                            self.message = Some(String::from("Invalid weight & date format!"));
+                            self.message = Some((String::from("Invalid weight & date format!"), MessageType::Error));
                         }
                     }
                 },
                 (_, KeyCode::Tab) => match self.current_window {
                     WindowType::MainWindow => self.toggle_frame(),
-                    WindowType::InputPopup => self.selected_area = (self.selected_area + 1) % 2,
+                    WindowType::InputPopup => match self.text_mode {
+                        Some(TextMode::Append) => self.selected_area = (self.selected_area + 1) % 2,
+                        _ => {}
+                    },
                     _ => {}
                 },
                 (_, KeyCode::Backspace) => match self.current_window {
@@ -1007,6 +1050,21 @@ impl App<'_> {
                                         self.text_mode = Some(TextMode::Edit);
                                         self.init_text_area();
                                     }
+                                    'd' => {
+                                        if self.rm_confirm {
+                                            let idx = self.table_state.selected_mut();
+                                            if let None = idx {
+                                                return Err(Error::other("No row is selected."));
+                                            }
+                                            let idx = idx.unwrap();
+                                            let data_ref = self.data.get_mut();
+                                            let selected = data_ref[idx].clone();
+                                            self.modify_data((selected.0, None));
+                                        } else {
+                                            self.rm_confirm = true;
+                                            self.message = Some((String::from("Press 'd' again to confirm deletion"), MessageType::Warning));
+                                        }
+                                    }
                                     _ => {}
                                 };
                             } else if self.current_frame == FrameType::Chart {
@@ -1017,18 +1075,6 @@ impl App<'_> {
                                     }
                                     'k' => self.cycle_prev_tf(),
                                     'j' => self.cycle_next_tf(),
-                                    'a' => {
-                                        self.current_window = WindowType::InputPopup;
-                                        self.scroll_offset = 0;
-                                        self.text_mode = Some(TextMode::Append);
-                                        self.init_text_area();
-                                    }
-                                    'e' => {
-                                        self.current_window = WindowType::InputPopup;
-                                        self.scroll_offset = 0;
-                                        self.text_mode = Some(TextMode::Edit);
-                                        self.init_text_area();
-                                    }
                                     'h' => match self.current_tf {
                                         ChartTimeFrame::Month => {
                                             self.selected_date_m = self
