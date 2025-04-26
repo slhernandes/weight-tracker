@@ -882,10 +882,10 @@ impl App<'_> {
                 ),
                 WindowType::MainWindow => match self.current_frame {
                     FrameType::Chart => String::from(
-                        "Esc/q: quit app | a: append table | e: edit selected row | j/k: cycle chart | h/l: (-/+)x-axis",
+                        "Esc/q: quit app | j/k: cycle chart | h/l: (-/+)x-axis",
                     ),
                     FrameType::Table => String::from(
-                        "Esc/q: quit app | a: append table | e: edit selected row | j/k: (↓/↑) 1 row | d: delete 1 row",
+                        "Esc/q: quit app | a: add entry | e: edit selected row | j/k: (down/up) 1 row | d: delete 1 row",
                     ),
                 },
             };
